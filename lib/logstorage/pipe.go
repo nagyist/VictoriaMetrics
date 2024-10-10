@@ -99,6 +99,12 @@ func parsePipes(lex *lexer) ([]pipe, error) {
 
 func parsePipe(lex *lexer) (pipe, error) {
 	switch {
+	case lex.isKeyword("blocks_count"):
+		pc, err := parsePipeBlocksCount(lex)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse 'blocks_count' pipe: %w", err)
+		}
+		return pc, nil
 	case lex.isKeyword("copy", "cp"):
 		pc, err := parsePipeCopy(lex)
 		if err != nil {
@@ -159,6 +165,12 @@ func parsePipe(lex *lexer) (pipe, error) {
 			return nil, fmt.Errorf("cannot parse 'format' pipe: %w", err)
 		}
 		return pf, nil
+	case lex.isKeyword("len"):
+		pl, err := parsePipeLen(lex)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse 'len' pipe: %w", err)
+		}
+		return pl, nil
 	case lex.isKeyword("limit", "head"):
 		pl, err := parsePipeLimit(lex)
 		if err != nil {
@@ -207,7 +219,7 @@ func parsePipe(lex *lexer) (pipe, error) {
 			return nil, fmt.Errorf("cannot parse 'replace_regexp' pipe: %w", err)
 		}
 		return pr, nil
-	case lex.isKeyword("sort"):
+	case lex.isKeyword("sort"), lex.isKeyword("order"):
 		ps, err := parsePipeSort(lex)
 		if err != nil {
 			return nil, fmt.Errorf("cannot parse 'sort' pipe: %w", err)
@@ -284,6 +296,7 @@ func parsePipe(lex *lexer) (pipe, error) {
 
 var pipeNames = func() map[string]struct{} {
 	a := []string{
+		"blocks_count",
 		"copy", "cp",
 		"delete", "del", "rm", "drop",
 		"drop_empty_fields",
@@ -294,6 +307,7 @@ var pipeNames = func() map[string]struct{} {
 		"fields", "keep",
 		"filter", "where",
 		"format",
+		"len",
 		"limit", "head",
 		"math", "eval",
 		"offset", "skip",
@@ -302,8 +316,8 @@ var pipeNames = func() map[string]struct{} {
 		"rename", "mv",
 		"replace",
 		"replace_regexp",
-		"sort",
-		"stats",
+		"sort", "order",
+		"stats", "by",
 		"stream_context",
 		"top",
 		"uniq",

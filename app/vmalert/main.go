@@ -31,14 +31,14 @@ import (
 )
 
 var (
-	rulePath = flagutil.NewArrayString("rule", `Path to the files or http url with alerting and/or recording rules.
+	rulePath = flagutil.NewArrayString("rule", `Path to the files or http url with alerting and/or recording rules in YAML format.
 Supports hierarchical patterns and regexpes.
 Examples:
  -rule="/path/to/file". Path to a single file with alerting rules.
  -rule="http://<some-server-addr>/path/to/rules". HTTP URL to a page with alerting rules.
  -rule="dir/*.yaml" -rule="/*.yaml" -rule="gcs://vmalert-rules/tenant_%{TENANT_ID}/prod". 
  -rule="dir/**/*.yaml". Includes all the .yaml files in "dir" subfolders recursively.
-Rule files may contain %{ENV_VAR} placeholders, which are substituted by the corresponding env vars.
+Rule files support YAML multi-document. Files may contain %{ENV_VAR} placeholders, which are substituted by the corresponding env vars.
 
 Enterprise version of vmalert supports S3 and GCS paths to rules.
 For example: gs://bucket/path/to/rules, s3://bucket/path/to/rules
@@ -76,7 +76,7 @@ absolute path to all .tpl files in root.
 		`Link to VMUI: -external.alert.source='vmui/#/?g0.expr={{.Expr|queryEscape}}'. `+
 		`If empty 'vmalert/alert?group_id={{.GroupID}}&alert_id={{.AlertID}}' is used.`)
 	externalLabels = flagutil.NewArrayString("external.label", "Optional label in the form 'Name=value' to add to all generated recording rules and alerts. "+
-		"Pass multiple -label flags in order to add multiple label sets.")
+		"In case of conflicts, original labels are kept with prefix `exported_`.")
 
 	remoteReadIgnoreRestoreErrors = flag.Bool("remoteRead.ignoreRestoreErrors", true, "Whether to ignore errors from remote storage when restoring alerts state on startup. DEPRECATED - this flag has no effect and will be removed in the next releases.")
 

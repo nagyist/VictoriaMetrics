@@ -974,10 +974,10 @@ in [export APIs](https://docs.victoriametrics.com/#how-to-export-time-series).
 - Unix timestamps in milliseconds. For example, `1562529662678`.
 - [RFC3339](https://www.ietf.org/rfc/rfc3339.txt). For example, `2022-03-29T01:02:03Z` or `2022-03-29T01:02:03+02:30`.
 - Partial RFC3339. Examples: `2022`, `2022-03`, `2022-03-29`, `2022-03-29T01`, `2022-03-29T01:02`, `2022-03-29T01:02:03`.
-  The partial RFC3339 time is in UTC timezone by default. It is possible to specify timezone there by adding `+hh:mm` or `-hh:mm` suffix to partial time.
-  For example, `2022-03-01+06:30` is `2022-03-01` at `06:30` timezone.
+  The partial RFC3339 time is in local timezone of the host where VictoriaMetrics runs.
+  It is possible to specify the needed timezone by adding `Z` (UTC), `+hh:mm` or `-hh:mm` suffix to partial time.
+  For example, `2022-03-01Z` corresponds to the given date in UTC timezone, while `2022-03-01+06:30` corresponds to `2022-03-01` date at `06:30` timezone.
 - Relative duration comparing to the current time. For example, `1h5m`, `-1h5m` or `now-1h5m` means `one hour and five minutes ago`, while `now` means `now`.
-
 
 ## Graphite API usage
 
@@ -1184,7 +1184,10 @@ In this case [forced merge](#forced-merge) may help freeing up storage space.
 
 It is recommended verifying which metrics will be deleted with the call to `http://<victoria-metrics-addr>:8428/api/v1/series?match[]=<timeseries_selector_for_delete>`
 before actually deleting the metrics. By default, this query will only scan series in the past 5 minutes, so you may need to
-adjust `start` and `end` to a suitable range to achieve match hits.
+adjust `start` and `end` to a suitable range to achieve match hits. Also, if the
+number of returned time series is rather big you will need to set
+`-search.maxDeleteSeries` flag (see
+[Resource usage limits](#resource-usage-limits)).
 
 The `/api/v1/admin/tsdb/delete_series` handler may be protected with `authKey` if `-deleteAuthKey` command-line flag is set.
 Note that handler accepts any HTTP method, so sending a `GET` request to `/api/v1/admin/tsdb/delete_series` will result in deletion of time series.
@@ -1202,8 +1205,8 @@ Using the delete API is not recommended in the following cases, since it brings 
 * Reducing disk space usage by deleting unneeded time series. This doesn't work as expected, since the deleted
   time series occupy disk space until the next merge operation, which can never occur when deleting too old data.
   [Forced merge](#forced-merge) may be used for freeing up disk space occupied by old data.
-  Note that VictoriaMetrics doesn't delete entries from inverted index (aka `indexdb`) for the deleted time series.
-  Inverted index is cleaned up once per the configured [retention](#retention).
+  Note that VictoriaMetrics doesn't delete entries from [IndexDB](#indexdb) for the deleted time series.
+  IndexDB is cleaned up once per the configured [retention](#retention).
 
 It's better to use the `-retentionPeriod` command-line flag for efficient pruning of old data.
 
@@ -1356,7 +1359,7 @@ Additionally, VictoriaMetrics can accept metrics via the following popular data 
 * `/api/v1/import/prometheus` for importing data in Prometheus exposition format and in [Pushgateway format](https://github.com/prometheus/pushgateway#url).
   See [these docs](#how-to-import-data-in-prometheus-exposition-format) for details.
 
-Please note, most of the ingestion APIs (except [Prometheus remote_write API](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write))
+Please note, most of the ingestion APIs (except [Prometheus remote_write API](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write) and [OpenTelemetry](#sending-data-via-opentelemetry))
 are optimized for performance and processes data in a streaming fashion.
 It means that client can transfer unlimited amount of data through the open connection. Because of this, import APIs
 may not return parsing errors to the client, as it is expected for data stream to be not interrupted. 
@@ -1721,6 +1724,13 @@ By default, VictoriaMetrics is tuned for an optimal resource usage under typical
   of CPU time and memory when the database contains big number of unique time series because of [high churn rate](https://docs.victoriametrics.com/faq/#what-is-high-churn-rate).
   In this case it might be useful to set the `-search.maxSeries` to quite low value in order limit CPU and memory usage.
   See also `-search.maxLabelsAPIDuration` and `-search.maxLabelsAPISeries`.
+- `-search.maxDeleteSeries` limits the number of unique time series that can be
+  deleted by a single
+  [/api/v1/admin/tsdb/delete_series](https://docs.victoriametrics.com/url-examples/#apiv1admintsdbdelete_series)
+  call. Deleting too many time series may require big amount of CPU and memory
+  and this limit guards against unplanned resource usage spikes. Also see
+  [How to delete time series](#how-to-delete-time-series) section to learn about
+  different ways of deleting series.
 - `-search.maxTagKeys` limits the number of items, which may be returned from [/api/v1/labels](https://docs.victoriametrics.com/url-examples/#apiv1labels).
   This endpoint is used mostly by Grafana for auto-completion of label names. Queries to this endpoint may take big amounts of CPU time and memory
   when the database contains big number of unique time series because of [high churn rate](https://docs.victoriametrics.com/faq/#what-is-high-churn-rate).
@@ -1905,7 +1915,46 @@ See more details in [monitoring docs](#monitoring).
 
 See [this article](https://valyala.medium.com/how-victoriametrics-makes-instant-snapshots-for-multi-terabyte-time-series-data-e1f3fb0e0282) for more details.
 
-See also [how to work with snapshots](#how-to-work-with-snapshots).
+See also [how to work with snapshots](#how-to-work-with-snapshots) and [IndexDB](#indexdb).
+
+## IndexDB
+
+VictoriaMetrics identifies
+[time series](https://docs.victoriametrics.com/keyconcepts/#time-series) by
+`TSID` (time series ID) and stores
+[raw samples](https://docs.victoriametrics.com/keyconcepts/#raw-samples) sorted
+by TSID (see [Storage](#storage)). Thus, the TSID is a primary index and could
+be used for searching and retrieving raw samples. However, the TSID is never
+exposed to the clients, i.e. it is for internal use only.
+
+Instead, VictoriaMetrics maintains an **inverted index** that enables searching
+the raw samples by metric name, label name, and label value by mapping these
+values to the corresponding TSIDs.
+
+VictoriaMetrics uses two types of inverted indexes:
+
+-   Global index. Searches using this index is performed across the entire
+    retention period.
+-   Per-day index. This index stores mappings similar to ones in global index
+    but also includes the date in each mapping. This speeds up data retrieval
+    for queries within a shorter time range (which is often just the last day).
+
+When the search query is executed, VictoriaMetrics decides which index to use
+based on the time range of the query:
+
+-   Per-day index is used if the search time range is 40 days or less.
+-   Global index is used for search queries with a time range greater than 40
+    days.
+
+Mappings are added to the indexes during the data ingestion:
+
+-   In global index each mapping is created only once per retention period.
+-   In the per-day index each mapping is be created for each unique date that
+    has been seen in the samples for the corresponding time series.
+
+IndexDB respects [retention period](#retention) and once it is over, the indexes
+are dropped. For the new retention period, the indexes are gradually populated
+again as the new samples arrive.
 
 ## Retention
 
@@ -1969,8 +2018,8 @@ For example, the following config sets 3 days retention for time series with `te
 Important notes:
 
 - The data outside the configured retention isn't deleted instantly - it is deleted eventually during [background merges](https://docs.victoriametrics.com/#storage).
-- The `-retentionFilter` doesn't remove old data from `indexdb` (aka inverted index) until the configured [-retentionPeriod](#retention).
-  So the `indexdb` size can grow big under [high churn rate](https://docs.victoriametrics.com/faq/#what-is-high-churn-rate)
+- The `-retentionFilter` doesn't remove old data from [IndexDB](#indexdb) until the configured [-retentionPeriod](#retention).
+  So the IndexDB size can grow big under [high churn rate](https://docs.victoriametrics.com/faq/#what-is-high-churn-rate)
   even for small retentions configured via `-retentionFilter`.
 
 It is safe updating `-retentionFilter` during VictoriaMetrics restarts - the updated retention filters are applied eventually
@@ -2650,7 +2699,7 @@ To update the documentation follow the steps below:
   - To update other pages, apply changes to the corresponding file in [docs folder](https://github.com/VictoriaMetrics/VictoriaMetrics/tree/master/docs).
 - If your changes contain an image then see [images in documentation](https://docs.victoriametrics.com/#images-in-documentation).
 - Create [a pull request](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request)
-  with proposed changes and wait for it to be merged.
+  with proposed changes and wait for it to be merged. See [contributing](https://docs.victoriametrics.com/contributing/).
 
 Requirements for changes to docs:
 
@@ -2989,6 +3038,8 @@ Pass `-help` to VictoriaMetrics in order to see the list of supported command-li
      How frequently to reload the full state from Kubernetes API server (default 30m0s)
   -promscrape.kubernetes.attachNodeMetadataAll
      Whether to set attach_metadata.node=true for all the kubernetes_sd_configs at -promscrape.config . It is possible to set attach_metadata.node=false individually per each kubernetes_sd_configs . See https://docs.victoriametrics.com/sd_configs/#kubernetes_sd_configs
+  -promscrape.kubernetes.useHTTP2Client
+     Whether to use HTTP/2 client for connection to Kubernetes API server. This may reduce amount of concurrent connections to API server when watching for a big number of Kubernetes objects.
   -promscrape.kubernetesSDCheckInterval duration
      Interval for checking for changes in Kubernetes API server. This works only if kubernetes_sd_configs is configured in '-promscrape.config' file. See https://docs.victoriametrics.com/sd_configs/#kubernetes_sd_configs for details (default 30s)
   -promscrape.kumaSDCheckInterval duration
@@ -3012,6 +3063,8 @@ Pass `-help` to VictoriaMetrics in order to see the list of supported command-li
      Interval for checking for changes in Nomad. This works only if nomad_sd_configs is configured in '-promscrape.config' file. See https://docs.victoriametrics.com/sd_configs/#nomad_sd_configs for details (default 30s)
   -promscrape.openstackSDCheckInterval duration
      Interval for checking for changes in openstack API server. This works only if openstack_sd_configs is configured in '-promscrape.config' file. See https://docs.victoriametrics.com/sd_configs/#openstack_sd_configs for details (default 30s)
+  -promscrape.ovhcloudSDCheckInterval duration
+     Interval for checking for changes in OVH Cloud VPS and dedicated server. This works only if ovhcloud_sd_configs is configured in '-promscrape.config' file. See https://docs.victoriametrics.com/sd_configs/#ovhcloud_sd_configs for details (default 30s)
   -promscrape.seriesLimitPerTarget int
      Optional limit on the number of unique time series a single scrape target can expose. See https://docs.victoriametrics.com/vmagent/#cardinality-limiter for more info
   -promscrape.streamParse
